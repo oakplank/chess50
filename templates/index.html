@@ -1,0 +1,24 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="main-content">
+    <div class="board-container">
+        <a href="{{ url_for('game') }}" class="play-now">
+            <div class="board">
+                <img src="/static/images/board.png" alt="Board Image">
+                <div class="overlay-text">Play Now</div>
+            </div>
+        </a>
+    </div>
+    <div class="info-section">
+        <h1>Chess50</h1>
+        <p>Welcome to my CS50 final project! My implementation of classic game of chess.</p>
+        <h2>To Be Completed...</h2>
+        <ul>
+            <li>Accounts and game log</li>
+            <li>Implement a chess engine for bot play</li>
+            <li>Chess tutorials and resources</li>
+        </ul>
+    </div>
+</div>
+{% endblock %}
