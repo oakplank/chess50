@@ -1,27 +1,14 @@
-from flask import Flask, render_template, request, jsonify
 import copy
 
-app = Flask(__name__)
-
-# Constant Variables
-# Mapping of chess pieces to their SVG file paths
-PIECE_TO_SVG = {
-    'bn': 'svg/pieces/bn.svg',
-    'br': 'svg/pieces/br.svg',
-    'bb': 'svg/pieces/bb.svg',
-    'bq': 'svg/pieces/bq.svg',
-    'bk': 'svg/pieces/bk.svg',
-    'bp': 'svg/pieces/bp.svg',
-    'wr': 'svg/pieces/wr.svg',
-    'wn': 'svg/pieces/wn.svg',
-    'wb': 'svg/pieces/wb.svg',
-    'wq': 'svg/pieces/wq.svg',
-    'wk': 'svg/pieces/wk.svg',
-    'wp': 'svg/pieces/wp.svg'
+# CLI Chess Game
+# Unicode representations for chess pieces and empty squares
+unicode_pieces = {
+    'br': '♜', 'bn': '♞', 'bb': '♝', 'bq': '♛', 'bk': '♚', 'bp': '♟︎',
+    'wr': '♖', 'wn': '♘', 'wb': '♗', 'wq': '♕', 'wk': '♔', 'wp': '♙',
+    None: '  ' 
 }
 
-# Global variables for the current state of the game
-# Represents the current state of the chessboard
+# Initial board setup
 current_board_state = [
     ['br', 'bn', 'bb', 'bq', 'bk', 'bb', 'bn', 'br'],
     ['bp'] * 8,
@@ -33,233 +20,54 @@ current_board_state = [
     ['wr', 'wn', 'wb', 'wq', 'wk', 'wb', 'wn', 'wr']
 ]
 
-# Stores the initial state of the chessboard for reference
-initial_board_state = copy.deepcopy(current_board_state)
-
-# Tracking the pieces that have been taken during the game
-taken_pieces = {'white': [], 'black': []}
-
-# List of moves made during the game in PGN format
-game_moves = []
-
-# Current move number in the game
-current_move_number = 1
-
-# Flags to track if specific pieces (kings and rooks) have moved, used for castling logic
+# Tracking castling pieces movement
 pieces_moved = {
     'wk': False, 'wr1': False, 'wr2': False,
     'bk': False, 'br1': False, 'br2': False
 }
 
-# Flask Route Handlers
 
-@app.route('/')
-def home():
-    """Renders the home page."""
-    return render_template('index.html')
-
-@app.route('/game')
-def game():
-    """Renders the game page with the current board state."""
-    print("Current board state:", current_board_state)
-    return render_template('game.html', board=current_board_state, piece_to_svg=PIECE_TO_SVG, enumerate=enumerate)
-
-@app.route('/record_move', methods=['POST'])
-def record_move():
-    """Handles the recording of a player's move, updates game state."""
-    global current_board_state, taken_pieces, game_moves, current_move_number, last_move
-    data = request.json
-    print("Received move data:", data)
-
-    from_position = convert_position(data.get('from'))
-    to_position = convert_position(data.get('to'))
-    piece_code = current_board_state[from_position[0]][from_position[1]]
-
-    # Initialize last_move if it does not exist
-    if 'last_move' not in globals():
-        last_move = None
-
-    # Check for invalid move (same square)
-    if from_position == to_position:
-        return jsonify({'success': False, 'message': 'Move to the same square is not allowed'})
-
-    if piece_code is None:
-        return jsonify({'success': False, 'message': 'No piece at the source position'})
-
-    captured_piece = None
-
-    # Castling move detection
-    if piece_code in ['wk', 'bk'] and abs(from_position[1] - to_position[1]) == 2:
-        try:
-            rook_col = 7 if to_position[1] > from_position[1] else 0
-            perform_castling((from_position[0], from_position[1]), (from_position[0], rook_col), current_board_state, to_position[1] > from_position[1])
-        except ValueError as e:
-            return jsonify({'success': False, 'message': str(e)})
-    else:
-        # Other moves
-        is_en_passant = False
-        if piece_code[1] == 'p':
-            is_first_move = (piece_code == 'wp' and from_position[0] == 6) or (piece_code == 'bp' and from_position[0] == 1)
-            valid_moves = get_pawn_moves(from_position, current_board_state, is_first_move, last_move)
-            if to_position not in valid_moves:
-                return jsonify({'success': False, 'message': 'Invalid move'})
-            is_en_passant = to_position in [move for move in valid_moves if current_board_state[move[0]][move[1]] is None]
-        else:
-            if not is_legal_move(from_position, to_position, piece_code, current_board_state):
-                return jsonify({'success': False, 'message': 'Invalid move'})
-
-        captured_piece = move_piece(current_board_state, from_position, to_position)
-
-        if is_en_passant:
-            captured_pawn_row = from_position[0]
-            captured_pawn_col = to_position[1]
-            captured_piece = current_board_state[captured_pawn_row][captured_pawn_col]
-            current_board_state[captured_pawn_row][captured_pawn_col] = None
-
-        if captured_piece and captured_piece != piece_code:
-            color = 'white' if captured_piece[0] == 'b' else 'black'
-            taken_pieces[color].append(captured_piece)
-
-    pgn_move = convert_to_pgn(data.get('from'), data.get('to'), piece_code, captured_piece is not None)
-
-    if len(game_moves) == 0 or len(game_moves[-1].split(' ')) == 3:
-        game_moves.append(f"{current_move_number}. {pgn_move}")
-    else:
-        game_moves[-1] += f" {pgn_move}"
-        current_move_number += 1
-
-    last_move = {
-        'from_position': from_position,
-        'to_position': to_position,
-        'piece_code': piece_code
-    }
-
-    # Calculate the taken pieces after the move
-    taken_pieces = calculate_taken_pieces()
-
-    response_data = {
-        'success': True,
-        'message': 'Move recorded',
-        'newBoardState': current_board_state,
-        'takenPieces': taken_pieces,
-        'gameMoves': ' '.join(game_moves)
-    }
-
-    print("Sending response data:", response_data)
-    return jsonify(response_data)
-
-
-@app.route('/reset_game', methods=['POST'])
-def reset_game():
-    """Resets the game to its initial state."""
-    global current_board_state, taken_pieces, game_moves, current_move_number, pieces_moved
-
-    current_board_state = [
-        ['br', 'bn', 'bb', 'bq', 'bk', 'bb', 'bn', 'br'],
-        ['bp'] * 8,
-        [None] * 8,
-        [None] * 8,
-        [None] * 8,
-        [None] * 8,
-        ['wp'] * 8,
-        ['wr', 'wn', 'wb', 'wq', 'wk', 'wb', 'wn', 'wr']
-    ]
-    taken_pieces = {'white': [], 'black': []}
-    game_moves = []
-    current_move_number = 1
-
-    pieces_moved = {
-        'wk': False, 'wr1': False, 'wr2': False,
-        'bk': False, 'br1': False, 'br2': False
-    }
-
-    print("Game reset")  # For debugging
-    return jsonify({'success': True, 'message': 'Game reset', 'newBoardState': current_board_state, 'gameMoves': ' '.join(game_moves)})
-
-
-@app.route('/attempt_castle', methods=['POST'])
-def attempt_castle():
-    """Handles a player's attempt to castle."""
-    global current_board_state, game_moves, current_move_number
-    data = request.json
-    from_position = data.get('from')
-    to_position = data.get('to')
-    piece_code = data.get('piece')
-
-    # Convert positions from algebraic notation to row and column indices
-    from_row, from_col = convert_position(from_position)
-    to_row, to_col = convert_position(to_position)
-
-    # Determine if the castling is kingside or queenside
-    is_kingside = to_col > from_col
-
-    # Determine the rook involved in castling based on the direction of the king's move
-    rook_col = 7 if is_kingside else 0
-    rook_position = (from_row, rook_col)
-
-    try:
-        # Perform the castling move
-        updated_board_state = perform_castling((from_row, from_col), rook_position, current_board_state, is_kingside)
-
-        # Update the board state after successful castling
-        current_board_state = updated_board_state
-
-        # Construct PGN notation for the castling move
-        castling_notation = 'O-O' if is_kingside else 'O-O-O'
-        pgn_move = f"{castling_notation}"
-
-        # Record the move
-        if piece_code.startswith('w'):
-            game_moves.append(f"{current_move_number}. {pgn_move}")
-        else:
-            game_moves[-1] += f" {pgn_move}"
-            current_move_number += 1
-
-        return jsonify({'success': True, 'newBoardState': current_board_state, 'gameMoves': ' '.join(game_moves)})
-    except ValueError as e:
-        return jsonify({'success': False, 'message': str(e)})
-
-
-@app.route('/get_current_board', methods=['GET'])
-def get_current_board():
-    """Returns the current state of the chessboard."""
-    return jsonify(current_board_state)
-
-
-# Game Logic Functions
-
-def store_initial_board_state():
-    """Stores the initial state of the chessboard for reference throughout the game."""
-    global initial_board_state
-    initial_board_state = copy.deepcopy(current_board_state)
-
-def count_pieces(board_state):
-    """Counts the number of each piece on the board."""
-    piece_count = {'wp': 0, 'bp': 0, 'wn': 0, 'bn': 0, 'wb': 0, 'bb': 0, 'wr': 0, 'br': 0, 'wq': 0, 'bq': 0, 'wk': 0, 'bk': 0}
-
-    for row in board_state:
-        for piece in row:
-            if piece:
-                piece_count[piece] += 1
-
-    return piece_count
-
-def calculate_taken_pieces():
-    '''Calculates the pieces that have been taken from the game.'''
-    initial_counts = count_pieces(initial_board_state)
-    current_counts = count_pieces(current_board_state)
-
-    taken_pieces = {'white': [], 'black': []}
-
-    for piece, count in initial_counts.items():
-        taken_count = count - current_counts[piece]
-        for _ in range(taken_count):
-            color = 'white' if piece.startswith('b') else 'black'
-            taken_pieces[color].append(piece)
-
-    return taken_pieces
+def display_board(board_state):
+    # Add two spaces before the column headers
+    header = ' ' * 4 + '   '.join('abcdefgh') + '  '
+    print(header)
+    
+    # Print the top border of the board
+    print('  +' + '---+' * 8)
+    
+    # Print each row of the board
+    for i, row in enumerate(board_state):
+        # Start the row with the row number and an extra space
+        row_str = f"{8 - i} |"
+        
+        # For each square in the row, add the piece or the colored square
+        for j, piece in enumerate(row):
+            char = unicode_pieces[piece] if piece else get_square_color(i, j)
+            row_str += f" {char} |"
+        
+        # Print the row with an extra leading space for alignment
+        print(row_str)
+        
+        # Print the border below the row
+        print('  +' + '---+' * 8)
+    
+    # Print the bottom header with two extra spaces for alignment
+    print(header)
 
 # Piece movement functions
+    
+def is_first_move(position, board_state):
+    row, col = position
+    piece = board_state[row][col]
+
+    if piece and piece[1] == 'p':  # Check if it's a pawn
+        if piece[0] == 'w' and row == 6:  # White pawn on its starting row
+            return True
+        elif piece[0] == 'b' and row == 1:  # Black pawn on its starting row
+            return True
+
+    return False
+
 
 def get_pawn_moves(start_position, board_state, is_first_move, last_move):
     '''Returns a list of valid moves for a pawn given the current board state.'''
@@ -267,18 +75,14 @@ def get_pawn_moves(start_position, board_state, is_first_move, last_move):
     direction = -1 if board_state[start_position[0]][start_position[1]].startswith('w') else 1
     row, col = start_position
 
-    print(f"Starting Position: {start_position}, Direction: {direction}")
-
     # Forward move
     forward_row = row + direction
     if 0 <= forward_row < 8 and board_state[forward_row][col] is None:
         moves.append((forward_row, col))
-        print(f"Forward Move Added: {(forward_row, col)}")
         if is_first_move:
             double_forward_row = forward_row + direction
             if 0 <= double_forward_row < 8 and board_state[double_forward_row][col] is None:
                 moves.append((double_forward_row, col))
-                print(f"Double Forward Move Added: {(double_forward_row, col)}")
 
     # Diagonal captures including en passant
     for diagonal_col in [col - 1, col + 1]:
@@ -288,10 +92,8 @@ def get_pawn_moves(start_position, board_state, is_first_move, last_move):
 
             if target_piece and target_piece[0] != board_state[row][col][0]:
                 moves.append((diagonal_row, diagonal_col))
-                print(f"Regular Capture Move Added: {(diagonal_row, diagonal_col)}")
 
             elif not target_piece and last_move:
-                print(f"Checking En Passant at Diagonal: {(diagonal_row, diagonal_col)}")
                 # Adjusted Conditions for En Passant
                 condition_1 = last_move and last_move['piece_code'][1] == 'p' and abs(last_move['from_position'][0] - last_move['to_position'][0]) == 2
                 condition_2 = abs(last_move['to_position'][1] - col) == 1  # Adjacent column
@@ -299,24 +101,13 @@ def get_pawn_moves(start_position, board_state, is_first_move, last_move):
                 condition_4 = abs(diagonal_col - col) == 1  # Diagonal to adjacent column
                 condition_5 = diagonal_col == last_move['to_position'][1]  # Diagonal towards last move's pawn
 
-                print(f"Last Move Data: {last_move}")
-                print(f"Condition 1 (Last move was a two-square advance): {condition_1}")
-                print(f"Condition 2 (Last move pawn is in the same column as current pawn's start): {condition_2}")
-                print(f"Condition 3 (Pawn is in correct row for en passant): {condition_3}")
-                print(f"Condition 4 (Diagonal move is to adjacent column): {condition_4}")
-                print(f"Condition 5 (Diagonal move is towards last move's pawn): {condition_5}")
-
                 if condition_1 and condition_2 and condition_3 and condition_4 and condition_5:
                     en_passant_capture_row = row  # The row of the captured pawn
                     en_passant_capture_col = diagonal_col  # The column of the captured pawn
                     board_state[en_passant_capture_row][en_passant_capture_col] = None  # Remove the captured pawn
                     moves.append((diagonal_row, diagonal_col))  # Add en passant move
-                    print(f"En Passant Move Added: {(en_passant_capture_row, en_passant_capture_col)}")
-                else:
-                    print("En Passant Conditions Not Met")
-
-    print(f"Final Move List: {moves}")
     return moves
+
 
 def get_knight_moves(start_position, board_state):
     '''Returns a list of valid moves for a knight given the current board state.'''
@@ -333,6 +124,7 @@ def get_knight_moves(start_position, board_state):
             if target_piece is None or target_piece[0] != start_piece[0]:
                 moves.append((row, col))
     return moves
+
 
 def get_bishop_moves(start_position, board_state):
     '''Returns a list of valid moves for a bishop given the current board state.'''
@@ -357,6 +149,7 @@ def get_bishop_moves(start_position, board_state):
                 break
     return moves
 
+
 def get_rook_moves(start_position, board_state):
     '''Returns a list of valid moves for a rook given the current board state.'''
     moves = []
@@ -379,6 +172,7 @@ def get_rook_moves(start_position, board_state):
                     moves.append((row, col))
                 break
     return moves
+
 
 def get_queen_moves(start_position, board_state):
     '''Returns a list of valid moves for a queen given the current board state.'''
@@ -403,7 +197,6 @@ def get_king_moves(start_position, board_state):
     return moves
 
 
-
 def is_move_valid(start_position, end_position, board_state):
     '''Returns True if the move is valid, False otherwise.'''
     piece = board_state[start_position[0]][start_position[1]]
@@ -416,10 +209,6 @@ def is_move_valid(start_position, end_position, board_state):
 def move_piece(board, from_index, to_index):
     '''Moves a piece from the from_index to the to_index on the board.'''
     global pieces_moved
-
-    # Print the move details
-    print(f"Moving from {from_index} to {to_index}")
-
     piece = board[from_index[0]][from_index[1]]
     captured_piece = board[to_index[0]][to_index[1]]
 
@@ -436,37 +225,33 @@ def move_piece(board, from_index, to_index):
 
     return captured_piece
 
-# Game Logic
-def is_legal_move(start_position, end_position, piece_code, board_state):
-    '''Returns True if the move is legal, False otherwise.'''
 
-    # Determine valid moves based on the piece type
+def is_legal_move(from_position, to_position, board_state, player, last_move):
+    from_row, from_col = from_position
+    to_row, to_col = to_position
+    piece = board_state[from_row][from_col]
+
+    # Ensure a piece is selected and it belongs to the current player
+    if piece is None or piece[0] != player:
+        return False
+
+    # Determine the type of the piece and get its valid moves
     valid_moves = []
-    if piece_code[1] == 'p':
-        valid_moves = get_pawn_moves(from_position, current_board_state, is_first_move, last_move)
-    elif piece_code[1] == 'r':
-        valid_moves = get_rook_moves(start_position, board_state)
-    elif piece_code[1] == 'n':
-        valid_moves = get_knight_moves(start_position, board_state)
-    elif piece_code[1] == 'b':
-        valid_moves = get_bishop_moves(start_position, board_state)
-    elif piece_code[1] == 'q':
-        valid_moves = get_queen_moves(start_position, board_state)
-    elif piece_code[1] == 'k':
-        valid_moves = get_king_moves(start_position, board_state)
+    if piece[1] == 'p':  # Pawn
+        valid_moves = get_pawn_moves(from_position, board_state, is_first_move(from_position, board_state), last_move)
+    elif piece[1] == 'n':  # Knight
+        valid_moves = get_knight_moves(from_position, board_state)
+    elif piece[1] == 'b':  # Bishop
+        valid_moves = get_bishop_moves(from_position, board_state)
+    elif piece[1] == 'r':  # Rook
+        valid_moves = get_rook_moves(from_position, board_state)
+    elif piece[1] == 'q':  # Queen
+        valid_moves = get_queen_moves(from_position, board_state)
+    elif piece[1] == 'k':  # King
+        valid_moves = get_king_moves(from_position, board_state)
 
-    # Check if the end position is within valid moves
-    if end_position not in valid_moves:
-        return False
-
-    # Make a temporary move and check for check
-    temp_board = copy.deepcopy(board_state)
-    move_piece(temp_board, start_position, end_position)
-    king_position = find_king(temp_board, piece_code[0])
-    if is_in_check(king_position, temp_board):
-        return False
-
-    return True
+    # Check if the to_position is in the list of valid moves
+    return (to_row, to_col) in valid_moves
 
 
 def is_in_check(king_position, board_state):
@@ -514,16 +299,52 @@ def is_in_check(king_position, board_state):
 
     return False
 
-def is_opponents_piece(start_position, end_position, board_state):
-    '''Returns True if the end position contains an opponent's piece, False otherwise.'''
-    start_piece = board_state[start_position[0]][start_position[1]]
-    end_piece = board_state[end_position[0]][end_position[1]]
 
-    if end_piece is None:
+def has_legal_moves(board_state, player, last_move):
+    # Check for any legal moves for all pieces of the given player
+    for row in range(8):
+        for col in range(8):
+            if board_state[row][col] and board_state[row][col].startswith(player):
+                if piece_has_legal_moves((row, col), board_state, player, last_move):
+                    return True
+    return False
+
+def piece_has_legal_moves(start_position, board_state, player, last_move):
+    piece = board_state[start_position[0]][start_position[1]]
+    if not piece:
         return False
 
-    # Opponents piece if the colors are different
-    return start_piece[0] != end_piece[0]
+    # Get all potential moves for the piece
+    potential_moves = get_potential_moves(start_position, piece, board_state, last_move)
+    # Check if any of the potential moves are legal
+    for end_position in potential_moves:
+        if is_legal_move(start_position, end_position, board_state, player, last_move):
+            # Simulate the move and check if it leaves the king in check
+            temp_board = copy.deepcopy(board_state)
+            move_piece(temp_board, start_position, end_position)
+            king_position = find_king(temp_board, player)
+            if not is_in_check(king_position, temp_board):
+                return True
+    return False
+
+
+def get_potential_moves(start_position, piece, board_state, last_move):
+    '''Returns a list of potential moves for the given piece.'''
+    if piece[1] == 'p':  # Pawn
+        return get_pawn_moves(start_position, board_state, is_first_move(start_position, board_state), last_move)
+    elif piece[1] == 'n':  # Knight
+        return get_knight_moves(start_position, board_state)
+    elif piece[1] == 'b':  # Bishop
+        return get_bishop_moves(start_position, board_state)
+    elif piece[1] == 'r':  # Rook
+        return get_rook_moves(start_position, board_state)
+    elif piece[1] == 'q':  # Queen
+        return get_queen_moves(start_position, board_state)
+    elif piece[1] == 'k':  # King
+        return get_king_moves(start_position, board_state)
+    else:
+        return []  # For an unrecognized piece, return an empty list
+
 
 
 def is_path_clear(start_position, end_position, board_state):
@@ -546,51 +367,46 @@ def is_path_clear(start_position, end_position, board_state):
     return True
 
 
-def perform_castling(king_position, rook_position, board_state, is_kingside):
-    global pieces_moved
+def is_opponents_piece(start_position, end_position, board_state):
+    '''Returns True if the end position contains an opponent's piece, False otherwise.'''
+    start_piece = board_state[start_position[0]][start_position[1]]
+    end_piece = board_state[end_position[0]][end_position[1]]
 
-    king_row, king_col = king_position
-    rook_row, rook_col = rook_position
+    if end_piece is None:
+        return False
 
-    king_piece = 'wk' if king_row == 7 else 'bk'
+    # Opponents piece if the colors are different
+    return start_piece[0] != end_piece[0]
 
-    # Determine the correct key for the rook in pieces_moved
-    if rook_col == 0:  # Queen's side rook
-        rook_piece = 'wr1' if rook_row == 7 else 'br1'
-    elif rook_col == 7:  # King's side rook
-        rook_piece = 'wr2' if rook_row == 7 else 'br2'
-    else:
-        raise ValueError("Invalid rook position for castling")
+
+def perform_castling(move, board_state, player):
+
+    # Determine the row for the king and rook based on the player
+    row = 7 if player == 'w' else 0
+    king_start_col, king_end_col, rook_start_col, rook_end_col = (4, 6, 7, 5) if move in ['e1g1', 'e8g8'] else (4, 2, 0, 3)
 
     # Check if the king or rook has moved
-    if pieces_moved[king_piece] or pieces_moved[rook_piece]:
-        raise ValueError("Cannot castle if the king or rook has moved")
-
+    if pieces_moved[f'{player}k'] or pieces_moved[f'{player}r{1 if move in ["e1c1", "e8c8"] else 2}']:
+        print("Cannot castle, the king or rook has moved.")
+        return False
 
     # Check conditions for castling (not in check, no pieces between king and rook, etc.)
-    # Assuming functions like is_in_check and is_path_clear exist
-    if is_in_check(king_position, board_state) or not is_path_clear(king_position, rook_position, board_state):
-        raise ValueError("Castling conditions not met")
-
-    if is_kingside:
-        # Kingside castling logic
-        new_king_col = king_col + 2
-        new_rook_col = new_king_col - 1
-    else:
-        # Queenside castling logic
-        new_king_col = king_col - 2
-        new_rook_col = new_king_col + 1
+    if is_in_check((row, 4), board_state) or not is_path_clear((row, king_start_col), (row, rook_start_col), board_state):
+        print("Cannot castle due to castling rules.")
+        return False
 
     # Move king and rook to their new positions
-    board_state[king_row][king_col] = None
-    board_state[rook_row][rook_col] = None
-    board_state[king_row][new_king_col] = 'wk' if king_row == 7 else 'bk'  # Adjust piece code if necessary
-    board_state[rook_row][new_rook_col] = 'wr' if rook_row == 7 else 'br'  # Adjust piece code if necessary
+    board_state[row][king_start_col] = None
+    board_state[row][rook_start_col] = None
+    board_state[row][king_end_col] = f'{player}k'
+    board_state[row][rook_end_col] = f'{player}r'
 
-    return board_state
+    # Update pieces_moved flags
+    pieces_moved[f'{player}k'] = True
+    pieces_moved[f'{player}r{1 if move in ["e1c1", "e8c8"] else 2}'] = True
 
+    return True
 
-# Utility Functions
 
 def find_king(board_state, color):
     for row in range(8):
@@ -598,6 +414,42 @@ def find_king(board_state, color):
             if board_state[row][col] and board_state[row][col] == color + 'k':
                 return (row, col)
     return None
+
+
+def is_game_over(board_state, player, last_move):
+    king_position = find_king(board_state, player)
+    if is_in_check(king_position, board_state):
+        # Player is in check. Check if they have any legal moves left
+        if not has_legal_moves(board_state, player, last_move):
+            print(f"Checkmate! {'Black' if player == 'w' else 'White'} wins!")
+            return True
+        
+    return False
+
+
+def reset_game():
+    global current_board_state, current_player, last_move, pieces_moved
+    # Reset the board to the initial state
+    current_board_state = [
+        ['br', 'bn', 'bb', 'bq', 'bk', 'bb', 'bn', 'br'],
+        ['bp'] * 8,
+        [None] * 8,
+        [None] * 8,
+        [None] * 8,
+        [None] * 8,
+        ['wp'] * 8,
+        ['wr', 'wn', 'wb', 'wq', 'wk', 'wb', 'wn', 'wr']
+    ]
+    # Reset current player to white
+    current_player = 'w'
+    # Reset last move
+    last_move = None
+    # Reset pieces moved flags
+    pieces_moved = {
+        'wk': False, 'wr1': False, 'wr2': False,
+        'bk': False, 'br1': False, 'br2': False
+    }
+
 
 def get_piece_type(piece_code):
 
@@ -610,34 +462,126 @@ def get_piece_type(piece_code):
         'wk': 'K', 'bk': 'K'
     }[piece_code]
 
-def convert_to_pgn(from_position, to_position, piece_code, is_capture, promotion=None, check=False, checkmate=False):
-        piece_type = get_piece_type(piece_code)
-        capture_notation = 'x' if is_capture else ''
-        promotion_notation = f'={promotion.upper()}' if promotion else ''
-        check_notation = '+' if check else ('#' if checkmate else '')
 
-        # For pawns, include the starting file if there is a capture
-        from_file = from_position[0] if piece_type == '' and is_capture else ''
+def get_square_color(row, col):
+    # Use a full block for dark squares and a space for light squares
+    return '█' if (row + col) % 2 else ' '
 
-        # Construct the PGN move notation
-        pgn_move = f"{piece_type}{from_file}{capture_notation}{to_position}{promotion_notation}{check_notation}"
 
-        return pgn_move
+def get_user_move():
+    while True:
+        user_input = input("Enter your move: ").lower().strip()
+
+        if user_input == 'reset':
+            return 'reset', None
+
+        # Normalize the input by removing ' to ' if present
+        normalized_input = user_input.replace(' to ', '')
+
+        if user_input in ['e1g1', 'e1c1', 'e8g8', 'e8c8']:
+            return user_input, None
+
+        # Check if the normalized input is exactly 4 characters (e.g., 'e2e4')
+        if len(normalized_input) == 4 and all(char.isalnum() for char in normalized_input):
+            start_pos = normalized_input[:2]
+            end_pos = normalized_input[2:]
+            return start_pos, end_pos
+
+        else:
+            print("Invalid input. Please enter your move in the format 'e2e4' or 'e2 to e4'.")
+            continue
+
 
 def convert_position(pos):
-        column = ord(pos[0]) - ord('a')
-        row = 8 - int(pos[1])
-        return row, column
+    # Converts algebraic notation to a tuple of array indices (row, column)
+    row = 8 - int(pos[1])  # Rows are numbered from 1 to 8
+    column = ord(pos[0]) - ord('a')  # Columns are labeled from 'a' to 'h'
+    return (row, column)
 
 
-def has_moved(piece_code, position):
-    piece_key = piece_code if piece_code in ['wk', 'bk'] else piece_code + str(position[1])
-    return pieces_moved.get(piece_key, False)
+def process_move(from_position, to_position, board_state, current_player, last_move):
+    # Make the move temporarily
+    temp_board = copy.deepcopy(board_state)
+    move_piece(temp_board, from_position, to_position)
 
-def is_white_piece(position, board_state):
-    piece = board_state[position[0]][position[1]]
-    return piece and piece.startswith('w')
+    # Check if the opponent is now in check
+    opponent = 'b' if current_player == 'w' else 'w'
+    opponent_king_position = find_king(temp_board, opponent)
 
-def is_black_piece(position, board_state):
-    piece = board_state[position[0]][position[1]]
-    return piece and piece.startswith('b')
+    if is_in_check(opponent_king_position, temp_board):
+        print("Check!")
+    elif is_in_check(find_king(temp_board, current_player), temp_board):
+        print("Illegal move: cannot leave or place own king in check.")
+        return False  # Illegal move
+
+    # Confirm and make the actual move
+    move_piece(board_state, from_position, to_position)
+    return True
+
+
+# Main Game Loop
+def main():
+    global current_board_state, current_player, last_move
+    current_player = 'w'  # White starts the game
+    last_move = None  # Initialize last_move
+    print("Welcome to Chess!")
+    print("Enter moves in algebraic notation or verbose notation (e.g., 'e2e4' or 'e2 to e4').")
+    print("Enter 'reset' to reset the game.")
+
+    while not is_game_over(current_board_state, current_player, last_move):
+        display_board(current_board_state)
+        
+        print(f"{current_player.upper()}'s turn.")
+        from_move, to_move = get_user_move()
+
+        # Check for reset command
+        if from_move == 'reset':
+            reset_game()
+            print("Game has been reset.")
+            display_board(current_board_state)
+            continue
+
+        # Handle castling moves
+        if to_move is None and from_move in ['e1g1', 'e1c1', 'e8g8', 'e8c8']:
+            print("Castling move")
+            if perform_castling(from_move, current_board_state, current_player):
+                # Toggle player after a successful castling move
+                current_player = 'b' if current_player == 'w' else 'w'
+                continue
+            else:
+                print("Invalid castling move. Please try again.")
+                continue
+        else:
+            # Handle regular moves
+            from_row, from_col = convert_position(from_move)
+            to_row, to_col = convert_position(to_move)
+            piece_code = current_board_state[from_row][from_col]
+
+            if is_legal_move((from_row, from_col), (to_row, to_col), current_board_state, current_player, last_move):
+                # Update last_move before processing the current move
+                last_move = {
+                    'piece_code': piece_code,
+                    'from_position': (from_row, from_col),
+                    'to_position': (to_row, to_col)
+                }
+
+                if not process_move((from_row, from_col), (to_row, to_col), current_board_state, current_player, last_move):
+                    print("Invalid move. Please try again.")
+                    continue
+
+                # Toggle player after a successful move
+                current_player = 'b' if current_player == 'w' else 'w'
+            else:
+                print("Invalid move. Please try again.")
+
+    print("Game over")
+
+
+def handle_special_move(move, board_state, player):
+    print(f"handle_special_move called with move: {move}, board_state: {board_state}, player: {player}")
+    if move in ['e1g1', 'e1c1', 'e8g8', 'e8c8']:
+        return perform_castling(move, board_state, player)
+    return False
+
+if __name__ == '__main__':
+    main()
